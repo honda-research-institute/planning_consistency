@@ -117,7 +117,7 @@ def main():
     # Prepare model and dataloader
     model, test_loader = accelerator.prepare(model, test_loader)
     device = accelerator.device
-    data = torch.load(f"{checkpoint_results_folder}/{checkpoint_name}", map_location=device)
+    data = torch.load(f"{checkpoint_results_folder}/{checkpoint_name}", map_location=device, weights_only=False)
 
     # Load model
     model = accelerator.unwrap_model(model)
@@ -606,7 +606,7 @@ def validate_config_path(cfg_file_input):
         ValueError: If the path is invalid or outside allowed directories
     """
     # Define the allowed base directory
-    project_root = Path(__file__).resolve().parent.parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
     allowed_config_dir = project_root / "configs"
     
     # Convert input to Path object and resolve to absolute path
