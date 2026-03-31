@@ -153,7 +153,7 @@ def parse_config():
     # Training setup #################################################################
     parser.add_argument('--cfg_file',
                         type=str,
-                        default='configs/mtr/mtr+100_percent_data_waymo_v1_2_interactive.yaml',
+                        default='configs/mtr/mtr+100_percent_data_waymo_v1_2_validation.yaml',
                         help='specify the config for mtr encoder')
     parser.add_argument('--extra_tag',
                         type=str,
@@ -395,7 +395,7 @@ def validate_config_path(cfg_file_input):
         ValueError: If the path is invalid or outside allowed directories
     """
     # Define the allowed base directory
-    project_root = Path(__file__).resolve().parent.parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
     allowed_config_dir = project_root / "configs"
     
     # Convert input to Path object and resolve to absolute path

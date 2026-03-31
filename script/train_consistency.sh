@@ -2,42 +2,46 @@
 
 # Activate the conda environment
 source $(conda info --base)/etc/profile.d/conda.sh
-conda activate consistency
+conda activate /data/conda_envs/ftariq/envs/flowmatching
 
 # Set the GPU to use
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=2,3
 
 # Navigate to the project root directory
-cd /n/fs/beesondm/anjian/project/trajectory_diffusion
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
 # Set the PYTHONPATH to the project root directory
 export PYTHONPATH=$(pwd)
 
 # Define variables
-DATA_ROOT_DIR="PATH_TO_DATA_ROOT_DIR"
-RESULT_FOLDER="PATH_TO_RESULT_FOLDER"
-DATA_STAT_FILE_PATH="PATH_TO_DATA_STAT_FILE_PATH/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_1.pkl"
-ACCELERATOR_CONFIG="configs/accelerator/accelerator_config_batch_100_gpu_4.yaml"
-WANDB_API_KEY="YOUR_WANDB_API_KEY"
+DATA_ROOT_DIR="/data/datasets/womd_diffusion_processed/"
+CFG_FILE="${CFG_FILE_OVERRIDE:-$PROJECT_ROOT/configs/mtr/mtr+100_percent_data_waymo_v1_2_validation.yaml}"
+RESULT_FOLDER="${RESULT_FOLDER:-$PROJECT_ROOT/output/trajectory_consistency_50p}"
+DATA_STAT_FILE_PATH="/data/datasets/womd_diffusion_processed/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_0.25.pkl"
+ACCELERATOR_CONFIG="configs/accelerator/accelerator_config_batch_100_gpu_2.yaml"
+WANDB_API_KEY="wandb_v1_MtCJ0jheDj5Zq9VBN99Srl2evlu"
 
 accelerate launch \
     --config_file $ACCELERATOR_CONFIG \
-    --num_processes 4 \
+    --num_processes 2 \
     --num_machines 1 \
     --machine_rank 0 \
     --main_process_port 29508 \
     run/train/consistency/train_consistency.py \
+    --cfg_file=$CFG_FILE \
     --use_lr_scheduler=False \
     --data_root_dir=$DATA_ROOT_DIR \
     --result_folder=$RESULT_FOLDER \
     --workers 8 \
-    --dataset_downsample_ratio 1.0 \
-    --train_batch_size 100 \
-    --validation_batch_size 100 \
+    --dataset_downsample_ratio 0.25 \
+    --train_batch_size 64 \
+    --validation_batch_size 64 \
     --epochs 50 \
     --wandb_mode=offline \
     --wandb_api_key=$WANDB_API_KEY \
-    --project_name=multiagent_prediction \
+    --project_name=multiagent_prediction_50p \
     --unet_type=original_unet \
     --sigma_max=80. \
     --data_x_type=x_y_vx_vy \
