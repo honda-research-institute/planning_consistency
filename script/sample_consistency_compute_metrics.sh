@@ -1,35 +1,37 @@
 #!/bin/bash
+# set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+export PYTHONPATH="${PROJECT_ROOT}"
+cd "${PROJECT_ROOT}"
+
+# ---- Defaults (override via environment variables) -----------------------------
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # Define path variables
-PROJECT_ROOT="PATH_TO_PROJECT_FOLDER"
-DATA_ROOT_DIR="PATH_TO_DATA_ROOT_DIR"
-DATA_ROOT="${DATA_ROOT_DIR}/data/waymo/v1_2_interactive/processed_scenarios_validation_interactive"
+DATA_ROOT_DIR="${DATA_ROOT_DIR:-${PROJECT_ROOT}/../data/waymo/}"
+DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/../data/waymo/v1_2/processed_scenarios_validation}"
 OUTPUT_METRICS_DIR="${PROJECT_ROOT}/output/release"
 RESULT_FOLDER="${PROJECT_ROOT}/output/test"
-CHECKPOINT_FOLDER="${DATA_ROOT_DIR}/output/neuronic/multiagent_prediction/2024-10-27_17-58-20/checkpoint"
-DATA_STAT_FILE="${DATA_ROOT_DIR}/data/waymo/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_1.pkl"
+CHECKPOINT_FOLDER="${PROJECT_ROOT}/output/trajectory_consistency_10p/multiagent_prediction_10p/2026-03-31_02-06-41/checkpoint/"
+DATA_STAT_FILE="${DATA_ROOT_DIR}/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_0.1.pkl"
 TEST_SCRIPT="${PROJECT_ROOT}/run/test/consistency/test_trajectory_metrics.py"
-
-# Set environment variable
-export PYTHONPATH="${PROJECT_ROOT}"
-
-conda activate consistency
-
-cd ${PROJECT_ROOT}
 
 # consistency + guidance
 python \
 ${TEST_SCRIPT} \
 --wandb_mode offline \
---cfg_file configs/mtr/mtr+100_percent_data_waymo_v1_2_interactive.yaml \
+--cfg_file configs/mtr/mtr+100_percent_data_waymo_v1_2_validation.yaml \
 --output_metrics_dir ${OUTPUT_METRICS_DIR} \
 --data_root ${DATA_ROOT} \
 --data_root_dir ${DATA_ROOT_DIR} \
 --result_folder ${RESULT_FOLDER} \
---dataset_downsample_ratio 1.0 \
+--dataset_downsample_ratio 0.1 \
 --test_batch_size 40 \
 --checkpoint_results_folder ${CHECKPOINT_FOLDER} \
---checkpoint_name model-best_validation_epoch-46.pt \
+--checkpoint_name model-best_validation_epoch-23.pt \
 --to_sample True \
 --sample_num 1 \
 --plot_batch_idx "(0,)" \
