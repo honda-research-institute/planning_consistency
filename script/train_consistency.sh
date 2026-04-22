@@ -18,7 +18,7 @@ export PYTHONPATH=$(pwd)
 # Define variables
 DATA_ROOT_DIR="/data/datasets/womd_diffusion_processed/"
 CFG_FILE="${CFG_FILE_OVERRIDE:-$PROJECT_ROOT/configs/mtr/mtr+100_percent_data_waymo_v1_2_validation.yaml}"
-RESULT_FOLDER="${RESULT_FOLDER:-$PROJECT_ROOT/output/trajectory_consistency_50p}"
+RESULT_FOLDER="${RESULT_FOLDER:-$PROJECT_ROOT/output/trajectory_consistency_25p}"
 DATA_STAT_FILE_PATH="/data/datasets/womd_diffusion_processed/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_0.25.pkl"
 ACCELERATOR_CONFIG="configs/accelerator/accelerator_config_batch_100_gpu_2.yaml"
 WANDB_API_KEY="wandb_v1_MtCJ0jheDj5Zq9VBN99Srl2evlu"
@@ -41,7 +41,7 @@ accelerate launch \
     --epochs 50 \
     --wandb_mode=offline \
     --wandb_api_key=$WANDB_API_KEY \
-    --project_name=multiagent_prediction_50p \
+    --project_name=multiagent_prediction_25p \
     --unet_type=original_unet \
     --sigma_max=80. \
     --data_x_type=x_y_vx_vy \

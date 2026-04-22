@@ -1,22 +1,28 @@
 #!/bin/bash
 # set -euo pipefail
 
+# Activate the conda environment
+source $(conda info --base)/etc/profile.d/conda.sh
+conda activate /data/conda_envs/ftariq/envs/flowmatching
+
+# Set the GPU to use
+export CUDA_VISIBLE_DEVICES=2,3
+
+# Navigate to the project root directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
 
-export PYTHONPATH="${PROJECT_ROOT}"
-cd "${PROJECT_ROOT}"
-
-# ---- Defaults (override via environment variables) -----------------------------
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# Set the PYTHONPATH to the project root directory
+export PYTHONPATH=$(pwd)
 
 # Define path variables
-DATA_ROOT_DIR="${DATA_ROOT_DIR:-${PROJECT_ROOT}/../data/waymo/}"
-DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/../data/waymo/v1_2/processed_scenarios_validation}"
+DATA_ROOT_DIR="PATH_TO_DATA_ROOT_DIR"
+DATA_ROOT="${DATA_ROOT_DIR}/data/waymo/v1_2_interactive/processed_scenarios_validation_interactive"
 OUTPUT_METRICS_DIR="${PROJECT_ROOT}/output/release"
 RESULT_FOLDER="${PROJECT_ROOT}/output/test"
-CHECKPOINT_FOLDER="${PROJECT_ROOT}/output/trajectory_consistency_10p/multiagent_prediction_10p/2026-03-31_02-06-41/checkpoint/"
-DATA_STAT_FILE="${DATA_ROOT_DIR}/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_0.1.pkl"
+CHECKPOINT_FOLDER="${DATA_ROOT_DIR}/output/neuronic/multiagent_prediction/2024-10-27_17-58-20/checkpoint"
+DATA_STAT_FILE="${DATA_ROOT_DIR}/data/waymo/v1_2/training_data_local_coord_statistics_reference_type_last_valid_surrounding_k_5_distance_threshold_10_metric_only_future_data_downsample_1.pkl"
 TEST_SCRIPT="${PROJECT_ROOT}/run/test/consistency/test_trajectory_metrics.py"
 
 # consistency + guidance
@@ -28,7 +34,7 @@ ${TEST_SCRIPT} \
 --data_root ${DATA_ROOT} \
 --data_root_dir ${DATA_ROOT_DIR} \
 --result_folder ${RESULT_FOLDER} \
---dataset_downsample_ratio 0.1 \
+--dataset_downsample_ratio 0.25 \
 --test_batch_size 40 \
 --checkpoint_results_folder ${CHECKPOINT_FOLDER} \
 --checkpoint_name model-best_validation_epoch-23.pt \
