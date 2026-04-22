@@ -1,3 +1,4 @@
+from email import parser
 import time
 
 from run.train.consistency.trainer_consistency import Trainer
@@ -24,6 +25,100 @@ import numpy as np
 import pickle
 
 from run.test.consistency.test_consistency_utils import prepare_data_batch, compute_planning_constraint_violation, compute_trajectory_quality
+
+def compute_collision_rate(data_batch: dict, args):
+    world_coord_pred_x_future = data_batch["world_coord_pred_x_future"]
+    world_coord_surrounding_obj_trajs_future = data_batch["world_coord_surrounding_obj_trajs_future"]
+    surrounding_obj_trajs_future_valid_mask = data_batch["surrounding_obj_trajs_future_valid_mask"]
+
+    ego_agent_planned_trajectory = world_coord_pred_x_future[:, :, 0, :, :2]
+    surrounding_agent_gt_trajectory = world_coord_surrounding_obj_trajs_future[:, 1:, :, :2]
+    surrounding_agent_traj_mask = surrounding_obj_trajs_future_valid_mask[:, 1:, :]
+
+    threshold = 2.0
+
+    batch_size = ego_agent_planned_trajectory.shape[0]
+    sample_num = ego_agent_planned_trajectory.shape[1]
+
+    total_collision_count = 0
+    for b in range(batch_size):
+        for s in range(sample_num):
+            ego_traj = ego_agent_planned_trajectory[b, s]
+            has_collision = False
+
+            for a in range(surrounding_agent_gt_trajectory.shape[1]):
+                surr_traj = surrounding_agent_gt_trajectory[b, a]
+                valid_mask = surrounding_agent_traj_mask[b, a]
+
+                for t in range(ego_traj.shape[0]):
+                    if valid_mask[t]:
+                        if torch.norm(ego_traj[t] - surr_traj[t]) < threshold:
+                            has_collision = True
+                            break
+                if has_collision:
+                    break
+
+            if has_collision:
+                total_collision_count += 1
+
+    total_collision_count_per_batch = total_collision_count / sample_num if sample_num > 0 else 0.0
+    return batch_size, total_collision_count_per_batch
+
+def compute_prediction_metrics(data_batch: dict, args):
+    world_coord_pred_x_future = data_batch["world_coord_pred_x_future"]
+    world_coord_surrounding_obj_trajs_future = data_batch["world_coord_surrounding_obj_trajs_future"]
+    surrounding_obj_trajs_future_valid_mask = data_batch["surrounding_obj_trajs_future_valid_mask"]
+    center_agent_num = data_batch["center_agent_num"]
+    sample_num = data_batch["sample_num"]
+
+    minADE_list = []
+    meanADE_list = []
+    minFDE_list = []
+    meanFDE_list = []
+
+    for center_agent_idx in range(center_agent_num):
+        gt_traj = world_coord_surrounding_obj_trajs_future[center_agent_idx, 0, :, :2]
+        gt_mask = surrounding_obj_trajs_future_valid_mask[center_agent_idx, 0]
+
+        valid_timesteps = gt_mask.sum()
+        if valid_timesteps <= 0:
+            continue
+
+        last_valid_idx = torch.where(gt_mask)[0][-1]
+        last_valid_gt = gt_traj[last_valid_idx]
+
+        sample_ADEs = []
+        sample_FDEs = []
+        for sample_idx in range(sample_num):
+            pred_traj = world_coord_pred_x_future[center_agent_idx, sample_idx, 0, :, :2]
+
+            squared_distances = torch.sum((pred_traj - gt_traj) ** 2, dim=1)
+            masked_distances = squared_distances * gt_mask.float()
+            ADE = torch.sqrt(masked_distances).sum() / valid_timesteps
+
+            last_pred = pred_traj[-1]
+            FDE = torch.sqrt(torch.sum((last_pred - last_valid_gt) ** 2))
+
+            sample_ADEs.append(ADE)
+            sample_FDEs.append(FDE)
+
+        minADE_list.append(min(sample_ADEs))
+        meanADE_list.append(torch.mean(torch.stack(sample_ADEs)))
+        minFDE_list.append(min(sample_FDEs))
+        meanFDE_list.append(torch.mean(torch.stack(sample_FDEs)))
+
+    curr_batch_data_num = len(minADE_list)
+    if curr_batch_data_num == 0:
+        z = torch.tensor(0.0)
+        return 0, z, z, z, z
+
+    return (
+        curr_batch_data_num,
+        torch.mean(torch.stack(minADE_list)),
+        torch.mean(torch.stack(meanADE_list)),
+        torch.mean(torch.stack(minFDE_list)),
+        torch.mean(torch.stack(meanFDE_list)),
+    )
 
 
 def main():
@@ -130,144 +225,418 @@ def main():
     ema_model = ema.model
 
     ema_model.eval()
-        
-    # Sample and compute planning constraints ##############################################################################################
-    if args.to_sample == "True" and args.compute_planning_constraints == "True":
+
+    if args.to_sample != "True":
+        return
+
+    output_metrics_dir = Path(args.output_metrics_dir)
+    output_metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.compute_prediction_metrics == "True":
         total_batch_data_num = 0
-        total_goal_reaching_violation = 0.
-        total_acc_limit_violation = 0.
-        total_omega_limit_violation = 0.
+        total_minADE = 0.0
+        total_meanADE = 0.0
+        total_minFDE = 0.0
+        total_meanFDE = 0.0
 
         batch_idx = 0
         for batch in test_loader:
-            if args.to_test_entire_validation_set == "True":
+            if args.to_test_entire_validation_set == "True" or batch_idx in args.plot_batch_idx:
                 pass
             else:
-                if batch_idx in args.plot_batch_idx:
-                    pass
-                else:
-                    break
+                break
 
-            # Sample predicted_x_future
-            start_time = time.time()
-
-            image_parent_dir = f"{result_folder}/{args.model_name}/{args.image_type}_gradient_step_{args.gradient_step_num}_guidance_goal_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            image_parent_dir = (
+                f"{result_folder}/{args.model_name}/"
+                f"{args.image_type}_gradient_step_{args.gradient_step_num}_"
+                f"guidance_goal_{args.goal_reaching_guidance}_"
+                f"acceleration_{args.acceleration_limit_guidance}_"
+                f"angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            )
             os.makedirs(image_parent_dir, exist_ok=True)
-            
-            # predicted_x_future shape: (center_agent_num, sample_num, agent_num, timestep, x_feature_size)
-            predicted_x_future = model.sample(batch=batch, sample_num=args.sample_num, image_parent_dir=image_parent_dir, test_loader=test_loader)
 
-            end_time = time.time()
-            print(f"sample time need {end_time - start_time}")
+            predicted_x_future = ema_model.sample(
+                batch=batch,
+                sample_num=args.sample_num,
+                image_parent_dir=image_parent_dir,
+                test_loader=test_loader,
+                to_change_agent_goal=args.to_change_agent_goal,
+            )
+            if isinstance(predicted_x_future, tuple):
+                predicted_x_future = predicted_x_future[0]
 
-            # Prepare data 
-            if model_params['main_model_type'] == 'consistency':
-                data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args,
-                                to_transform_coordinate=True)
-            else:
-                raise ValueError(f"main_model_type {model_params['main_model_type']} is not supported")
+            data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args, to_transform_coordinate=True)
+            curr_n, curr_minADE, curr_meanADE, curr_minFDE, curr_meanFDE = compute_prediction_metrics(data_batch=data_batch, args=args)
 
-            # compute planning constraint violation
-            curr_batch_data_num, curr_batch_goal_reaching_violation, curr_batch_acc_limit_violation, curr_batch_omega_limit_violation = compute_planning_constraint_violation(data_batch=data_batch, args=args)
+            total_batch_data_num += curr_n
+            total_minADE += float(curr_minADE) * curr_n
+            total_meanADE += float(curr_meanADE) * curr_n
+            total_minFDE += float(curr_minFDE) * curr_n
+            total_meanFDE += float(curr_meanFDE) * curr_n
 
-            total_batch_data_num += curr_batch_data_num
-            total_goal_reaching_violation += curr_batch_goal_reaching_violation * curr_batch_data_num
-            total_acc_limit_violation += curr_batch_acc_limit_violation * curr_batch_data_num
-            total_omega_limit_violation += curr_batch_omega_limit_violation * curr_batch_data_num
-
-
-            # print the progress for every 5 batches
             if batch_idx % 5 == 0:
-                print(f"current progress: {batch_idx / len(test_loader) * 100:.2f}%")
+                print(f"prediction metrics progress: {batch_idx / len(test_loader) * 100:.2f}%")
 
             batch_idx += 1
 
-        print("sample is done!")
-        print(f"total_batch_data_num {total_batch_data_num}")
-    
-        goal_reaching_violation = total_goal_reaching_violation / total_batch_data_num
-        acc_limit_violation = total_acc_limit_violation / total_batch_data_num
-        omega_limit_violation = total_omega_limit_violation / total_batch_data_num
+        if total_batch_data_num > 0:
+            minADE = total_minADE / total_batch_data_num
+            meanADE = total_meanADE / total_batch_data_num
+            minFDE = total_minFDE / total_batch_data_num
+            meanFDE = total_meanFDE / total_batch_data_num
+        else:
+            minADE = meanADE = minFDE = meanFDE = 0.0
 
-        # Save the data to a file
-        if not os.path.exists(f"{args.output_metrics_dir}/planning_constraints"):
-            os.makedirs(f"{args.output_metrics_dir}/planning_constraints", exist_ok=True)
-        data_path = f"{args.output_metrics_dir}/planning_constraints/{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}_planning_constraints.txt"  # Specify your desired file path
+        out_dir = output_metrics_dir / "prediction_metrics"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (
+            f"{args.model_name}_sampling_step_{args.sampling_steps}_"
+            f"guidance_goal_reaching_{args.goal_reaching_guidance}_"
+            f"acceleration_{args.acceleration_limit_guidance}_"
+            f"angular_{args.angular_speed_limit_guidance}_"
+            f"sample_num_{args.sample_num}_prediction_metrics.txt"
+        )
+        out_path.write_text(
+            f"model {args.model_name}, sample num {args.sample_num}, "
+            f"guidance goal_reaching {args.goal_reaching_guidance}, "
+            f"acceleration {args.acceleration_limit_guidance}, "
+            f"angular {args.angular_speed_limit_guidance}, "
+            f"total_batch_data_num {total_batch_data_num}, "
+            f"minADE {minADE}, meanADE {meanADE}, minFDE {minFDE}, meanFDE {meanFDE}\n"
+        )
 
-        # Open the file in write mode ('w')
-        with open(data_path, 'w') as f:
-            # Write the formatted string to the file
-            f.write(f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, total_batch_data_num {total_batch_data_num}, goal_reaching_violation {goal_reaching_violation}, acc_limit_violation {acc_limit_violation}, omega_limit_violation {omega_limit_violation}\n")
-        
-        print(f"{data_path} is saved!")
-
-    # Sample and compute trajectory quality ##############################################################################################
-    if args.to_sample == "True" and args.compute_trajectory_quality == "True":
+    if args.compute_planning_constraints == "True":
         total_batch_data_num = 0
-        total_angle_change = 0.
-        total_path_length = 0.
-        total_curvature = 0.
+        total_goal = 0.0
+        total_acc = 0.0
+        total_omega = 0.0
 
         batch_idx = 0
         for batch in test_loader:
-            if args.to_test_entire_validation_set == "True":
+            if args.to_test_entire_validation_set == "True" or batch_idx in args.plot_batch_idx:
                 pass
             else:
-                if batch_idx in args.plot_batch_idx:
-                    pass
-                else:
-                    break
+                break
 
-            # Sample predicted_x_future
-            start_time = time.time()
-
-            image_parent_dir = f"{result_folder}/{args.model_name}/{args.image_type}_gradient_step_{args.gradient_step_num}_guidance_goal_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            image_parent_dir = (
+                f"{result_folder}/{args.model_name}/"
+                f"{args.image_type}_gradient_step_{args.gradient_step_num}_"
+                f"guidance_goal_{args.goal_reaching_guidance}_"
+                f"acceleration_{args.acceleration_limit_guidance}_"
+                f"angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            )
             os.makedirs(image_parent_dir, exist_ok=True)
-            
-            # predicted_x_future shape: (center_agent_num, sample_num, agent_num, timestep, x_feature_size)
-            predicted_x_future = model.sample(batch=batch, sample_num=args.sample_num, image_parent_dir=image_parent_dir, test_loader=test_loader)
 
-            end_time = time.time()
-            print(f"sample time need {end_time - start_time}")
+            start_time = time.time()
+            predicted_x_future = ema_model.sample(
+                batch=batch,
+                sample_num=args.sample_num,
+                image_parent_dir=image_parent_dir,
+                test_loader=test_loader,
+                to_change_agent_goal=args.to_change_agent_goal,
+            )
+            if isinstance(predicted_x_future, tuple):
+                predicted_x_future = predicted_x_future[0]
+            print(f"sample time need {time.time() - start_time}")
 
-            # Prepare data 
-            if model_params['main_model_type'] == 'consistency':
-                data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args,
-                                to_transform_coordinate=True)
-            else:
-                raise ValueError(f"main_model_type {model_params['main_model_type']} is not supported")
+            data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args, to_transform_coordinate=True)
+            curr_n, goal_v, acc_v, omega_v = compute_planning_constraint_violation(data_batch=data_batch, args=args)
 
-            # compute trajectory quality
-            curr_batch_data_num, curr_batch_angle_change, curr_batch_path_length, curr_batch_curvature = compute_trajectory_quality(data_batch=data_batch, args=args)
+            total_batch_data_num += curr_n
+            total_goal += float(goal_v) * curr_n
+            total_acc += float(acc_v) * curr_n
+            total_omega += float(omega_v) * curr_n
 
-            total_batch_data_num += curr_batch_data_num
-            total_angle_change += curr_batch_angle_change * curr_batch_data_num
-            total_path_length += curr_batch_path_length * curr_batch_data_num
-            total_curvature += curr_batch_curvature * curr_batch_data_num
-
-            # print the progress for every 5 batches
             if batch_idx % 5 == 0:
-                print(f"current progress: {batch_idx / len(test_loader) * 100:.2f}%")
+                print(f"planning constraints progress: {batch_idx / len(test_loader) * 100:.2f}%")
 
             batch_idx += 1
 
-        print("sample is done!")
+        if total_batch_data_num > 0:
+            goal_reaching_violation = total_goal / total_batch_data_num
+            acc_limit_violation = total_acc / total_batch_data_num
+            omega_limit_violation = total_omega / total_batch_data_num
+        else:
+            goal_reaching_violation = acc_limit_violation = omega_limit_violation = 0.0
+
+        out_dir = output_metrics_dir / "planning_constraints"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (
+            f"{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_"
+            f"acceleration_{args.acceleration_limit_guidance}_"
+            f"angular_{args.angular_speed_limit_guidance}_planning_constraints.txt"
+        )
+        out_path.write_text(
+            f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, "
+            f"acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, "
+            f"total_batch_data_num {total_batch_data_num}, goal_reaching_violation {goal_reaching_violation}, "
+            f"acc_limit_violation {acc_limit_violation}, omega_limit_violation {omega_limit_violation}\n"
+        )
+
+    if args.compute_trajectory_quality == "True":
+        total_batch_data_num = 0
+        total_angle = 0.0
+        total_length = 0.0
+        total_curv = 0.0
+
+        batch_idx = 0
+        for batch in test_loader:
+            if args.to_test_entire_validation_set == "True" or batch_idx in args.plot_batch_idx:
+                pass
+            else:
+                break
+
+            image_parent_dir = (
+                f"{result_folder}/{args.model_name}/"
+                f"{args.image_type}_gradient_step_{args.gradient_step_num}_"
+                f"guidance_goal_{args.goal_reaching_guidance}_"
+                f"acceleration_{args.acceleration_limit_guidance}_"
+                f"angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            )
+            os.makedirs(image_parent_dir, exist_ok=True)
+
+            start_time = time.time()
+            predicted_x_future = ema_model.sample(
+                batch=batch,
+                sample_num=args.sample_num,
+                image_parent_dir=image_parent_dir,
+                test_loader=test_loader,
+                to_change_agent_goal=args.to_change_agent_goal,
+            )
+            if isinstance(predicted_x_future, tuple):
+                predicted_x_future = predicted_x_future[0]
+            print(f"sample time need {time.time() - start_time}")
+
+            data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args, to_transform_coordinate=True)
+            curr_n, angle_change, path_length, curvature = compute_trajectory_quality(data_batch=data_batch, args=args)
+
+            total_batch_data_num += curr_n
+            total_angle += float(angle_change) * curr_n
+            total_length += float(path_length) * curr_n
+            total_curv += float(curvature) * curr_n
+
+            if batch_idx % 5 == 0:
+                print(f"trajectory quality progress: {batch_idx / len(test_loader) * 100:.2f}%")
+
+            batch_idx += 1
+
+        if total_batch_data_num > 0:
+            angle_change = total_angle / total_batch_data_num
+            path_length = total_length / total_batch_data_num
+            curvature = total_curv / total_batch_data_num
+        else:
+            angle_change = path_length = curvature = 0.0
+
+        out_dir = output_metrics_dir / "trajectory_quality"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (
+            f"{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_"
+            f"acceleration_{args.acceleration_limit_guidance}_"
+            f"angular_{args.angular_speed_limit_guidance}_trajectory_quality.txt"
+        )
+        out_path.write_text(
+            f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, "
+            f"acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, "
+            f"total_batch data num {total_batch_data_num}, angle change {angle_change}, "
+            f"path length {path_length}, curvature {curvature}\n"
+        )
+
+    if args.compute_collision_rate == "True":
+        total_batch_data_num = 0
+        total_collision_num = 0.0
+
+        batch_idx = 0
+        for batch in test_loader:
+            if args.to_test_entire_validation_set == "True" or batch_idx in args.plot_batch_idx:
+                pass
+            else:
+                break
+
+            image_parent_dir = (
+                f"{result_folder}/{args.model_name}/"
+                f"{args.image_type}_gradient_step_{args.gradient_step_num}_"
+                f"guidance_goal_{args.goal_reaching_guidance}_"
+                f"acceleration_{args.acceleration_limit_guidance}_"
+                f"angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+            )
+            os.makedirs(image_parent_dir, exist_ok=True)
+
+            predicted_x_future = ema_model.sample(
+                batch=batch,
+                sample_num=args.sample_num,
+                image_parent_dir=image_parent_dir,
+                test_loader=test_loader,
+                to_change_agent_goal=args.to_change_agent_goal,
+            )
+            if isinstance(predicted_x_future, tuple):
+                predicted_x_future = predicted_x_future[0]
+
+            data_batch = prepare_data_batch(
+                predicted_x_future=predicted_x_future, batch=batch, args=args, to_transform_coordinate=True
+            )
+            curr_batch_data_num, curr_batch_collision_num = compute_collision_rate(data_batch=data_batch, args=args)
+
+            total_batch_data_num += curr_batch_data_num
+            total_collision_num += float(curr_batch_collision_num)
+
+            if batch_idx % 5 == 0:
+                print(f"collision rate progress: {batch_idx / len(test_loader) * 100:.2f}%")
+            batch_idx += 1
+
+        collision_rate = total_collision_num / total_batch_data_num if total_batch_data_num > 0 else 0.0
+
+        out_dir = output_metrics_dir / "collision_rate"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / (
+            f"{args.model_name}_sampling_step_{args.sampling_steps}_"
+            f"guidance_goal_reaching_{args.goal_reaching_guidance}_"
+            f"acceleration_{args.acceleration_limit_guidance}_"
+            f"angular_{args.angular_speed_limit_guidance}_"
+            f"sample_num_{args.sample_num}_collision_rate.txt"
+        )
+        out_path.write_text(
+            f"model {args.model_name}, sample num {args.sample_num}, "
+            f"guidance goal_reaching {args.goal_reaching_guidance}, "
+            f"acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, "
+            f"total_batch_data_num {total_batch_data_num}, collision_rate {collision_rate}\n"
+        )
+    # # Sample and compute planning constraints ##############################################################################################
+    # if args.to_sample == "True" and args.compute_planning_constraints == "True":
+    #     total_batch_data_num = 0
+    #     total_goal_reaching_violation = 0.
+    #     total_acc_limit_violation = 0.
+    #     total_omega_limit_violation = 0.
+
+    #     batch_idx = 0
+    #     for batch in test_loader:
+    #         if args.to_test_entire_validation_set == "True":
+    #             pass
+    #         else:
+    #             if batch_idx in args.plot_batch_idx:
+    #                 pass
+    #             else:
+    #                 break
+
+    #         # Sample predicted_x_future
+    #         start_time = time.time()
+
+    #         image_parent_dir = f"{result_folder}/{args.model_name}/{args.image_type}_gradient_step_{args.gradient_step_num}_guidance_goal_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+    #         os.makedirs(image_parent_dir, exist_ok=True)
+            
+    #         # predicted_x_future shape: (center_agent_num, sample_num, agent_num, timestep, x_feature_size)
+    #         predicted_x_future = model.sample(batch=batch, sample_num=args.sample_num, image_parent_dir=image_parent_dir, test_loader=test_loader)
+
+    #         end_time = time.time()
+    #         print(f"sample time need {end_time - start_time}")
+
+    #         # Prepare data 
+    #         if model_params['main_model_type'] == 'consistency':
+    #             data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args,
+    #                             to_transform_coordinate=True)
+    #         else:
+    #             raise ValueError(f"main_model_type {model_params['main_model_type']} is not supported")
+
+    #         # compute planning constraint violation
+    #         curr_batch_data_num, curr_batch_goal_reaching_violation, curr_batch_acc_limit_violation, curr_batch_omega_limit_violation = compute_planning_constraint_violation(data_batch=data_batch, args=args)
+
+    #         total_batch_data_num += curr_batch_data_num
+    #         total_goal_reaching_violation += curr_batch_goal_reaching_violation * curr_batch_data_num
+    #         total_acc_limit_violation += curr_batch_acc_limit_violation * curr_batch_data_num
+    #         total_omega_limit_violation += curr_batch_omega_limit_violation * curr_batch_data_num
+
+
+    #         # print the progress for every 5 batches
+    #         if batch_idx % 5 == 0:
+    #             print(f"current progress: {batch_idx / len(test_loader) * 100:.2f}%")
+
+    #         batch_idx += 1
+
+    #     print("sample is done!")
+    #     print(f"total_batch_data_num {total_batch_data_num}")
     
-        angle_change = total_angle_change / total_batch_data_num
-        path_length = total_path_length / total_batch_data_num
-        curvature = total_curvature / total_batch_data_num
+    #     goal_reaching_violation = total_goal_reaching_violation / total_batch_data_num
+    #     acc_limit_violation = total_acc_limit_violation / total_batch_data_num
+    #     omega_limit_violation = total_omega_limit_violation / total_batch_data_num
 
-        # Save the data to a file
-        if not os.path.exists(f"{args.output_metrics_dir}/trajectory_quality"):
-            os.makedirs(f"{args.output_metrics_dir}/trajectory_quality", exist_ok=True)
-        data_path = f"{args.output_metrics_dir}/trajectory_quality/{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}_trajectory_quality.txt"  # Specify your desired file path
+    #     # Save the data to a file
+    #     if not os.path.exists(f"{args.output_metrics_dir}/planning_constraints"):
+    #         os.makedirs(f"{args.output_metrics_dir}/planning_constraints", exist_ok=True)
+    #     data_path = f"{args.output_metrics_dir}/planning_constraints/{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}_planning_constraints.txt"  # Specify your desired file path
 
-        # Open the file in write mode ('w')
-        with open(data_path, 'w') as f:
-            # Write the formatted string to the file
-            f.write(f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, total_batch_data_num {total_batch_data_num}, angle change {angle_change}, path length {path_length}, curvature {curvature}\n")
+    #     # Open the file in write mode ('w')
+    #     with open(data_path, 'w') as f:
+    #         # Write the formatted string to the file
+    #         f.write(f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, total_batch_data_num {total_batch_data_num}, goal_reaching_violation {goal_reaching_violation}, acc_limit_violation {acc_limit_violation}, omega_limit_violation {omega_limit_violation}\n")
         
-        print(f"{data_path} is saved!")
+    #     print(f"{data_path} is saved!")
+
+    # # Sample and compute trajectory quality ##############################################################################################
+    # if args.to_sample == "True" and args.compute_trajectory_quality == "True":
+    #     total_batch_data_num = 0
+    #     total_angle_change = 0.
+    #     total_path_length = 0.
+    #     total_curvature = 0.
+
+    #     batch_idx = 0
+    #     for batch in test_loader:
+    #         if args.to_test_entire_validation_set == "True":
+    #             pass
+    #         else:
+    #             if batch_idx in args.plot_batch_idx:
+    #                 pass
+    #             else:
+    #                 break
+
+    #         # Sample predicted_x_future
+    #         start_time = time.time()
+
+    #         image_parent_dir = f"{result_folder}/{args.model_name}/{args.image_type}_gradient_step_{args.gradient_step_num}_guidance_goal_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}/idx_{batch_idx}"
+    #         os.makedirs(image_parent_dir, exist_ok=True)
+            
+    #         # predicted_x_future shape: (center_agent_num, sample_num, agent_num, timestep, x_feature_size)
+    #         predicted_x_future = model.sample(batch=batch, sample_num=args.sample_num, image_parent_dir=image_parent_dir, test_loader=test_loader)
+
+    #         end_time = time.time()
+    #         print(f"sample time need {end_time - start_time}")
+
+    #         # Prepare data 
+    #         if model_params['main_model_type'] == 'consistency':
+    #             data_batch = prepare_data_batch(predicted_x_future=predicted_x_future, batch=batch, args=args,
+    #                             to_transform_coordinate=True)
+    #         else:
+    #             raise ValueError(f"main_model_type {model_params['main_model_type']} is not supported")
+
+    #         # compute trajectory quality
+    #         curr_batch_data_num, curr_batch_angle_change, curr_batch_path_length, curr_batch_curvature = compute_trajectory_quality(data_batch=data_batch, args=args)
+
+    #         total_batch_data_num += curr_batch_data_num
+    #         total_angle_change += curr_batch_angle_change * curr_batch_data_num
+    #         total_path_length += curr_batch_path_length * curr_batch_data_num
+    #         total_curvature += curr_batch_curvature * curr_batch_data_num
+
+    #         # print the progress for every 5 batches
+    #         if batch_idx % 5 == 0:
+    #             print(f"current progress: {batch_idx / len(test_loader) * 100:.2f}%")
+
+    #         batch_idx += 1
+
+    #     print("sample is done!")
+    
+    #     angle_change = total_angle_change / total_batch_data_num
+    #     path_length = total_path_length / total_batch_data_num
+    #     curvature = total_curvature / total_batch_data_num
+
+    #     # Save the data to a file
+    #     if not os.path.exists(f"{args.output_metrics_dir}/trajectory_quality"):
+    #         os.makedirs(f"{args.output_metrics_dir}/trajectory_quality", exist_ok=True)
+    #     data_path = f"{args.output_metrics_dir}/trajectory_quality/{args.model_name}_guidance_goal_reaching_{args.goal_reaching_guidance}_acceleration_{args.acceleration_limit_guidance}_angular_{args.angular_speed_limit_guidance}_trajectory_quality.txt"  # Specify your desired file path
+
+    #     # Open the file in write mode ('w')
+    #     with open(data_path, 'w') as f:
+    #         # Write the formatted string to the file
+    #         f.write(f"model {args.model_name}, guidance goal_reaching {args.goal_reaching_guidance}, acceleration {args.acceleration_limit_guidance}, angular {args.angular_speed_limit_guidance}, total_batch_data_num {total_batch_data_num}, angle change {angle_change}, path length {path_length}, curvature {curvature}\n")
+        
+    #     print(f"{data_path} is saved!")
 
 
 def parse_config():
@@ -538,9 +907,14 @@ def parse_config():
                     help='especially for diffusion model training timesteps, maybe larger than sampling steps')
     parser.add_argument('--compute_trajectory_quality',
                         type=str,
-                        default='False',
+                        default='True',
                         choices=['True', 'False'],
                         help='whether to compute trajectory quality')
+    parser.add_argument('--compute_collision_rate',
+                        type=str,
+                        default="True",
+                        choices=["True", "False"],
+                        help='whether to compute collision rate')
     parser.add_argument('--to_plot_planning_constraints',
                         type=str,
                         default='False',
@@ -571,10 +945,12 @@ def parse_config():
                         type=lambda x: x.lower() == 'true',
                         default=False,
                         help='whether to compute trajectory diversity')
-    parser.add_argument('--compute_collision_rate',
-                        type=lambda x: x.lower() == 'true',
-                        default=False,
-                        help='whether to compute collision rate')
+    parser.add_argument("--compute_prediction_metrics",
+                        type=str,
+                        default="True",
+                        choices=["True", "False"],
+                        help="whether to compute prediction metrics such as ADE/FDE")
+    parser.add_argument("--to_change_agent_goal", type=str, default="False", choices=["True", "False"])
 
     args = parser.parse_args()
 

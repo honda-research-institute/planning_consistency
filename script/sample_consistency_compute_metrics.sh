@@ -69,4 +69,5 @@ ${TEST_SCRIPT} \
 --sampling_steps 5 \
 --to_test_entire_validation_set True \
 --compute_planning_constraints True \
---compute_trajectory_quality True
+--compute_trajectory_quality True \
+--compute_collision_rate True
